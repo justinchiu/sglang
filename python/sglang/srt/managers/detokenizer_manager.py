@@ -250,12 +250,21 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
         output_routed_experts = []
         if recv_obj.output_routed_experts is not None:
             output_routed_experts = [
-                (
-                    output_routed_experts.tolist()
-                    if output_routed_experts is not None
-                    else []
-                )
-                for output_routed_experts in recv_obj.output_routed_experts
+                {
+                    "topk_ids": (
+                        re["topk_ids"].tolist()
+                        if re is not None and re.get("topk_ids") is not None
+                        else []
+                    ),
+                    "topk_weights": (
+                        re["topk_weights"].tolist()
+                        if re is not None and re.get("topk_weights") is not None
+                        else []
+                    ),
+                }
+                if re is not None
+                else None
+                for re in recv_obj.output_routed_experts
             ]
         return BatchStrOutput(
             rids=recv_obj.rids,

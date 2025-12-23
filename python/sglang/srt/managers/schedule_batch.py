@@ -44,7 +44,7 @@ import time
 from enum import Enum, auto
 from http import HTTPStatus
 from itertools import chain
-from typing import TYPE_CHECKING, Any, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -635,8 +635,8 @@ class Req:
 
         # capture routed experts
         self.return_routed_experts = return_routed_experts
-        self.routed_experts: Optional[torch.Tensor] = (
-            None  # cpu tensor: shape (seqlen, topk)
+        self.routed_experts: Optional[Dict[str, torch.Tensor]] = (
+            None  # dict with topk_ids and topk_weights, each shape (seqlen, num_layers, topk)
         )
 
         # Embedding (return values)

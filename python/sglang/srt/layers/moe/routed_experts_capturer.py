@@ -32,31 +32,40 @@ class _RoutedExpertsDeviceCache:
         num_hidden_layers: int,
         num_experts_per_tok: int,
         num_fused_shared_experts: int,
+        weights_dtype: torch.dtype,
         device: str,
     ) -> None:
-        self.buffer = torch.zeros(
-            (
-                max(
-                    get_global_server_args().chunked_prefill_size
-                    * get_global_server_args().dp_size,
-                    max_running_requests,
-                ),
-                num_hidden_layers,
-                num_experts_per_tok + num_fused_shared_experts,
+        buffer_shape = (
+            max(
+                get_global_server_args().chunked_prefill_size
+                * get_global_server_args().dp_size,
+                max_running_requests,
             ),
+            num_hidden_layers,
+            num_experts_per_tok + num_fused_shared_experts,
+        )
+        self.buffer = torch.zeros(
+            buffer_shape,
             dtype=torch.int32,
+            device=device,
+        )
+        # Buffer for routing weights (topk_weights)
+        self.weights_buffer = torch.zeros(
+            buffer_shape,
+            dtype=weights_dtype,
             device=device,
         )
         self._finalize_allocation_log()
 
     def get_buffer_size_bytes(self):
         assert hasattr(self, "buffer")
-        return get_tensor_size_bytes(self.buffer)
+        return get_tensor_size_bytes(self.buffer) + get_tensor_size_bytes(self.weights_buffer)
 
-    def capture_fwd_routed_experts(self, layer_id: int, topk_ids: torch.Tensor):
+    def capture_fwd_routed_experts(self, layer_id: int, topk_ids: torch.Tensor, topk_weights: torch.Tensor):
         assert layer_id is not None, "capturing routing experts but get layer_id None"
         batch, _ = topk_ids.shape
         self.buffer[:batch, layer_id, :] = topk_ids
+        self.weights_buffer[:batch, layer_id, :] = topk_weights
 
     def _finalize_allocation_log(self):
         """Common logging and memory usage computation for captured experts buffers."""
@@ -72,15 +81,24 @@ class _RoutedExpertsHostCache:
         num_tokens: int,
         num_hidden_layers: int,
         num_experts_per_tok: int,
+        weights_dtype: torch.dtype,
     ) -> None:
         self.num_tokens = num_tokens
+        buffer_shape = (
+            num_tokens,
+            num_hidden_layers,
+            num_experts_per_tok,
+        )
         self.buffer = torch.zeros(
-            (
-                num_tokens,
-                num_hidden_layers,
-                num_experts_per_tok,
-            ),
+            buffer_shape,
             dtype=torch.int32,
+            device="cpu",
+            pin_memory=True,
+        )
+        # Buffer for routing weights (topk_weights)
+        self.weights_buffer = torch.zeros(
+            buffer_shape,
+            dtype=weights_dtype,
             device="cpu",
             pin_memory=True,
         )
@@ -88,10 +106,7 @@ class _RoutedExpertsHostCache:
 
     def get_buffer_size_bytes(self):
         assert hasattr(self, "buffer")
-        return get_tensor_size_bytes(self.buffer)
-
-    def set_experts_buffer(self, layer_id: int, loc: torch.Tensor, top_k: torch.Tensor):
-        self.buffer[layer_id, loc, :] = top_k.to(device="cpu", non_blocking=True)
+        return get_tensor_size_bytes(self.buffer) + get_tensor_size_bytes(self.weights_buffer)
 
     def _finalize_allocation_log(self):
         """Common logging and memory usage computation for captured experts buffers."""
@@ -110,6 +125,7 @@ class RoutedExpertsCapturer(ABC):
         num_tokens: int,
         max_running_requests: int,
         device: str,
+        weights_dtype: torch.dtype = torch.float16,
     ):
         if enable:
             return _RoutedExpertsCapturerReal(
@@ -118,11 +134,12 @@ class RoutedExpertsCapturer(ABC):
                 max_running_requests=max_running_requests,
                 num_fused_shared_experts=num_fused_shared_experts,
                 device=device,
+                weights_dtype=weights_dtype,
             )
         else:
             return _RoutedExpertsCapturerNoop()
 
-    def capture(self, layer_id: int, topk_ids: torch.Tensor):
+    def capture(self, layer_id: int, topk_ids: torch.Tensor, topk_weights: torch.Tensor):
         raise NotImplementedError
 
     def get_routed_experts(
@@ -163,6 +180,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
         max_running_requests: int,
         num_fused_shared_experts: int,
         device: str,
+        weights_dtype: torch.dtype,
     ):
         self.forward_batch = None
         self.num_fused_shared_experts = num_fused_shared_experts
@@ -173,6 +191,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             num_tokens=num_tokens,
             num_hidden_layers=self.num_hidden_layers,
             num_experts_per_tok=self.num_experts_per_tok,
+            weights_dtype=weights_dtype,
         )
 
         self.device_cache = _RoutedExpertsDeviceCache(
@@ -180,11 +199,12 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             num_hidden_layers=self.num_hidden_layers,
             num_experts_per_tok=self.num_experts_per_tok,
             num_fused_shared_experts=self.num_fused_shared_experts,
+            weights_dtype=weights_dtype,
             device=device,
         )
 
-    def capture(self, layer_id: int, topk_ids: torch.Tensor):
-        self.device_cache.capture_fwd_routed_experts(layer_id, topk_ids)
+    def capture(self, layer_id: int, topk_ids: torch.Tensor, topk_weights: torch.Tensor):
+        self.device_cache.capture_fwd_routed_experts(layer_id, topk_ids, topk_weights)
 
     def sync_fwd_experts_buffer_DtoH(
         self,
@@ -205,7 +225,11 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             local_start_pos = 0
             local_end_pos = device_loc.shape[0]
 
+        # Copy both ids and weights from device to host
         self.host_cache.buffer[cpu_loc] = self.device_cache.buffer[
+            local_start_pos:local_end_pos, :, : self.num_experts_per_tok
+        ].cpu()
+        self.host_cache.weights_buffer[cpu_loc] = self.device_cache.weights_buffer[
             local_start_pos:local_end_pos, :, : self.num_experts_per_tok
         ].cpu()
 
@@ -218,7 +242,11 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
         cache_pool_idx = (
             req_to_token_pool.req_to_token[req_pool_idx][: seqlen - 1].cpu().clone()
         )
-        return self.get_host_cache().buffer[cache_pool_idx]
+        # Return dict with both topk_ids and topk_weights
+        return {
+            "topk_ids": self.get_host_cache().buffer[cache_pool_idx],
+            "topk_weights": self.get_host_cache().weights_buffer[cache_pool_idx],
+        }
 
     @contextmanager
     def with_forward(self, forward_batch):
@@ -236,7 +264,7 @@ class _RoutedExpertsCapturerNoop(RoutedExpertsCapturer):
     def __init__(self):
         pass
 
-    def capture(self, layer_id: int, topk_ids: torch.Tensor):
+    def capture(self, layer_id: int, topk_ids: torch.Tensor, topk_weights: torch.Tensor):
         pass
 
     def get_routed_experts(
@@ -245,7 +273,7 @@ class _RoutedExpertsCapturerNoop(RoutedExpertsCapturer):
         seqlen: int,
         req_to_token_pool: ReqToTokenPool,
     ):
-        pass
+        return None
 
     def sync_fwd_experts_buffer_DtoH(
         self,

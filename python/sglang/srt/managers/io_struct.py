@@ -918,8 +918,8 @@ class BatchTokenIDOutput(
     # Hidden states
     output_hidden_states: List[List[float]]
 
-    # The routed experts for each output token
-    output_routed_experts: List[torch.Tensor]
+    # The routed experts for each output token (dict with topk_ids and topk_weights tensors)
+    output_routed_experts: List[Optional[Dict[str, torch.Tensor]]]
 
     # The information of placeholder tokens (e.g., image token)
     # idx is the index of the token in the prompt after expansion.
@@ -1000,8 +1000,8 @@ class BatchStrOutput(
     # Hidden states
     output_hidden_states: List[List[float]]
 
-    # The routed experts for each output token
-    output_routed_experts: List[List[int]]
+    # The routed experts for each output token (dict with topk_ids and topk_weights lists)
+    output_routed_experts: List[Optional[Dict[str, List]]]
 
     # The information of placeholder tokens (e.g., image token)
     # idx is the index of the token in the prompt after expansion.
