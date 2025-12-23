@@ -258,6 +258,21 @@ def speculative_moe_backend_context():
         MOE_RUNNER_BACKEND = original_backend
 
 
+@contextmanager
+def speculative_moe_a2a_backend_context():
+    """
+    Context manager to temporarily use the speculative MoE A2A backend for draft model operations.
+    This ensures that draft models in speculative decoding use the configured speculative A2A backend.
+    """
+    global MOE_A2A_BACKEND
+    original_backend = MOE_A2A_BACKEND
+    try:
+        MOE_A2A_BACKEND = get_speculative_moe_a2a_backend()
+        yield
+    finally:
+        MOE_A2A_BACKEND = original_backend
+
+
 # The type of method in top-K routing, for use in torch custom op
 # Please keep this in sync with the counterpart defined in https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/trtllm/fused_moe/runner.h
 class RoutingMethodType(IntEnum):

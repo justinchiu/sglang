@@ -888,6 +888,7 @@ class TokenizerManager(TokenizerCommunicatorMixin):
                 session_params=session_params,
                 custom_logit_processor=obj.custom_logit_processor,
                 return_hidden_states=obj.return_hidden_states,
+                return_routed_experts=obj.return_routed_experts,
                 data_parallel_rank=obj.data_parallel_rank,
                 priority=obj.priority,
                 extra_key=obj.extra_key,
@@ -1621,6 +1622,9 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             if getattr(recv_obj, "output_hidden_states", None):
                 meta_info["hidden_states"] = recv_obj.output_hidden_states[i]
 
+            if getattr(recv_obj, "output_routed_experts", None):
+                meta_info["routed_experts"] = recv_obj.output_routed_experts[i]
+
             if isinstance(recv_obj, BatchStrOutput):
                 state.text += recv_obj.output_strs[i]
                 if self.server_args.stream_output and state.obj.stream:
@@ -1747,12 +1751,13 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             return
 
         if len(recv_obj.input_token_logprobs_val) > 0:
-            state.input_token_logprobs_val.extend(
-                recv_obj.input_token_logprobs_val[recv_obj_index]
-            )
-            state.input_token_logprobs_idx.extend(
-                recv_obj.input_token_logprobs_idx[recv_obj_index]
-            )
+            if recv_obj.input_token_logprobs_val[recv_obj_index]:
+                state.input_token_logprobs_val.extend(
+                    recv_obj.input_token_logprobs_val[recv_obj_index]
+                )
+                state.input_token_logprobs_idx.extend(
+                    recv_obj.input_token_logprobs_idx[recv_obj_index]
+                )
         state.output_token_logprobs_val.extend(
             recv_obj.output_token_logprobs_val[recv_obj_index]
         )

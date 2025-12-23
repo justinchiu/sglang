@@ -304,6 +304,17 @@ class NCCLLibrary:
         Function("ncclGroupEnd", ncclResult_t, []),
     ]
 
+    if os.environ.get("AMEM_ENABLE", "0") == "1":
+        exported_functions.extend(
+            [
+                # ncclResult_t ncclPause(ncclComm_t comm);
+                Function("ncclPause", ncclResult_t, [ncclComm_t]),
+                # ncclResult_t ncclResume(ncclComm_t comm);
+                Function("ncclResume", ncclResult_t, [ncclComm_t]),
+                Function("ncclSetGroupID", ncclResult_t, [ctypes.c_int]),
+            ]
+        )
+
     exported_functions_symm_mem = [
         # ncclResult_t ncclCommWindowRegister(ncclComm_t comm, void* buff, size_t size, ncclWindow_t* win, int winFlags);
         Function(
@@ -550,6 +561,12 @@ class NCCLLibrary:
 
     def ncclGroupEnd(self) -> None:
         self.NCCL_CHECK(self._funcs["ncclGroupEnd"]())
+
+    def ncclPause(self, comm: ncclComm_t) -> None:
+        self.NCCL_CHECK(self._funcs["ncclPause"](comm))
+
+    def ncclResume(self, comm: ncclComm_t) -> None:
+        self.NCCL_CHECK(self._funcs["ncclResume"](comm))
 
 
 __all__ = [

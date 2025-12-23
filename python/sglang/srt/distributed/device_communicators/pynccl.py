@@ -380,3 +380,9 @@ class PyNcclCommunicator:
 
         self.disabled = old_disable
         self.stream = old_stream
+
+    def nccl_pause(self):
+        self.nccl.ncclPause(self.comm)
+
+    def nccl_resume(self):
+        self.nccl.ncclResume(self.comm)

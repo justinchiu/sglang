@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import traceback
 from typing import TYPE_CHECKING, Tuple
 
@@ -12,6 +13,9 @@ from sglang.srt.constants import (
     GPU_MEMORY_TYPE_KV_CACHE,
     GPU_MEMORY_TYPE_WEIGHTS,
 )
+from sglang.srt.disaggregation.utils import DisaggregationMode
+from sglang.srt.distributed import get_moe_ep_group, get_moe_tp_group, get_tp_group
+from sglang.srt.layers.dp_attention import get_attention_tp_group
 from sglang.srt.managers.io_struct import (
     CheckWeightsReqInput,
     CheckWeightsReqOutput,
@@ -127,6 +131,13 @@ class SchedulerUpdateWeightsMixin:
             self.memory_saver_adapter.pause(GPU_MEMORY_TYPE_KV_CACHE)
             self.flush_cache()
 
+            if self.disaggregation_mode == DisaggregationMode.DECODE:
+                if hasattr(self, "disagg_decode_prealloc_queue"):
+                    self.disagg_decode_prealloc_queue.release_memory_occupation()
+            elif self.disaggregation_mode == DisaggregationMode.PREFILL:
+                if hasattr(self, "disagg_prefill_bootstrap_queue"):
+                    self.disagg_prefill_bootstrap_queue.release_memory_occupation()
+
         if GPU_MEMORY_TYPE_WEIGHTS in tags:
             self.stashed_model_static_state = _export_static_state(
                 self.tp_worker.model_runner.model
@@ -136,6 +147,20 @@ class SchedulerUpdateWeightsMixin:
 
         if GPU_MEMORY_TYPE_CUDA_GRAPH in tags:
             self.memory_saver_adapter.pause(GPU_MEMORY_TYPE_CUDA_GRAPH)
+
+            if os.environ.get("AMEM_ENABLE", "0") == "1":
+                tp_group = get_tp_group()
+                if tp_group is not None and tp_group.pynccl_comm is not None:
+                    tp_group.pynccl_comm.nccl_pause()
+                attn_tp_group = get_attention_tp_group()
+                if attn_tp_group is not None and attn_tp_group.pynccl_comm is not None:
+                    attn_tp_group.pynccl_comm.nccl_pause()
+                moe_ep_group = get_moe_ep_group()
+                if moe_ep_group is not None and moe_ep_group.pynccl_comm is not None:
+                    moe_ep_group.pynccl_comm.nccl_pause()
+                moe_tp_group = get_moe_tp_group()
+                if moe_tp_group is not None and moe_tp_group.pynccl_comm is not None:
+                    moe_tp_group.pynccl_comm.nccl_pause()
 
         torch.get_device_module().synchronize()
 
@@ -155,6 +180,20 @@ class SchedulerUpdateWeightsMixin:
         if GPU_MEMORY_TYPE_CUDA_GRAPH in tags:
             self.memory_saver_adapter.resume(GPU_MEMORY_TYPE_CUDA_GRAPH)
 
+            if os.environ.get("AMEM_ENABLE", "0") == "1":
+                tp_group = get_tp_group()
+                if tp_group is not None and tp_group.pynccl_comm is not None:
+                    tp_group.pynccl_comm.nccl_resume()
+                attn_tp_group = get_attention_tp_group()
+                if attn_tp_group is not None and attn_tp_group.pynccl_comm is not None:
+                    attn_tp_group.pynccl_comm.nccl_resume()
+                moe_ep_group = get_moe_ep_group()
+                if moe_ep_group is not None and moe_ep_group.pynccl_comm is not None:
+                    moe_ep_group.pynccl_comm.nccl_resume()
+                moe_tp_group = get_moe_tp_group()
+                if moe_tp_group is not None and moe_tp_group.pynccl_comm is not None:
+                    moe_tp_group.pynccl_comm.nccl_resume()
+
         if GPU_MEMORY_TYPE_WEIGHTS in tags:
             self.memory_saver_adapter.resume(GPU_MEMORY_TYPE_WEIGHTS)
             torch.distributed.barrier(self.tp_cpu_group)
@@ -166,6 +205,13 @@ class SchedulerUpdateWeightsMixin:
 
         if GPU_MEMORY_TYPE_KV_CACHE in tags:
             self.memory_saver_adapter.resume(GPU_MEMORY_TYPE_KV_CACHE)
+
+            if self.disaggregation_mode == DisaggregationMode.DECODE:
+                if hasattr(self, "disagg_decode_prealloc_queue"):
+                    self.disagg_decode_prealloc_queue.resume_memory_occupation()
+            elif self.disaggregation_mode == DisaggregationMode.PREFILL:
+                if hasattr(self, "disagg_prefill_bootstrap_queue"):
+                    self.disagg_prefill_bootstrap_queue.resume_memory_occupation()
 
         return ResumeMemoryOccupationReqOutput()
 
