@@ -225,6 +225,11 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             local_start_pos = 0
             local_end_pos = device_loc.shape[0]
 
+        if self.forward_batch.num_token_non_padded is not None:
+            assert local_end_pos - local_start_pos >= self.forward_batch.num_token_non_padded
+            local_end_pos = local_start_pos + self.forward_batch.num_token_non_padded
+            cpu_loc = cpu_loc[: self.forward_batch.num_token_non_padded]
+
         # Copy both ids and weights from device to host
         self.host_cache.buffer[cpu_loc] = self.device_cache.buffer[
             local_start_pos:local_end_pos, :, : self.num_experts_per_tok
