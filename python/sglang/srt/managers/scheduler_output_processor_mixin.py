@@ -113,13 +113,14 @@ class SchedulerOutputProcessorMixin:
                     req.check_finished()
 
                     if req.finished():
-                        req.routed_experts = (
-                            get_global_experts_capturer().get_routed_experts(
-                                req_pool_idx=req.req_pool_idx,
-                                seqlen=req.seqlen,
-                                req_to_token_pool=self.req_to_token_pool,
-                            )
+                        routed_experts = get_global_experts_capturer().get_routed_experts(
+                            req_pool_idx=req.req_pool_idx,
+                            seqlen=req.seqlen,
+                            req_to_token_pool=self.req_to_token_pool,
                         )
+                        req.routed_experts = routed_experts
+                        if routed_experts is not None:
+                            logger.info(f"get_routed_experts returned: type={type(routed_experts)}, keys={routed_experts.keys() if isinstance(routed_experts, dict) else 'N/A'}")
 
                         release_kv_cache(req, self.tree_cache)
                         req.time_stats.completion_time = time.perf_counter()

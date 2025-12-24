@@ -586,9 +586,11 @@ class ModelRunner:
         else:
             num_fused_shared_experts = 0
 
+        enable_capturer = get_global_server_args().enable_return_routed_experts
+        logger.info(f"RoutedExpertsCapturer: enable={enable_capturer}")
         set_global_experts_capturer(
             RoutedExpertsCapturer.create(
-                enable=get_global_server_args().enable_return_routed_experts,
+                enable=enable_capturer,
                 model_config=self.model_config,
                 num_fused_shared_experts=num_fused_shared_experts,
                 num_tokens=self.max_total_num_tokens + self.page_size,
