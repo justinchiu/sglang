@@ -278,19 +278,40 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
 
         return output_strs
 
-    def _extract_routed_experts(self, recv_obj: BatchTokenIDOutput) -> List[List[int]]:
-        output_routed_experts = None
-        if recv_obj.output_routed_experts is not None:
-            output_routed_experts = [
-                (
-                    pybase64.b64encode(output_routed_experts.numpy().tobytes()).decode(
-                        "utf-8"
-                    )
-                    if output_routed_experts is not None
-                    else []
+    def _extract_routed_experts(self, recv_obj: BatchTokenIDOutput):
+        """Extract and serialize routed experts to base64-encoded format.
+
+        Handles both new dict format (with topk_ids and topk_weights tensors)
+        and legacy tensor format (ids only).
+
+        Returns:
+            List of dicts with 'topk_ids' and 'topk_weights' as base64 strings,
+            or None if not available.
+        """
+        if recv_obj.output_routed_experts is None:
+            return None
+
+        output_routed_experts = []
+        for routed_experts in recv_obj.output_routed_experts:
+            if routed_experts is None:
+                output_routed_experts.append(None)
+            elif isinstance(routed_experts, dict):
+                # New format: dict with topk_ids and topk_weights tensors
+                result = {}
+                if "topk_ids" in routed_experts and routed_experts["topk_ids"] is not None:
+                    result["topk_ids"] = pybase64.b64encode(
+                        routed_experts["topk_ids"].numpy().tobytes()
+                    ).decode("utf-8")
+                if "topk_weights" in routed_experts and routed_experts["topk_weights"] is not None:
+                    result["topk_weights"] = pybase64.b64encode(
+                        routed_experts["topk_weights"].numpy().tobytes()
+                    ).decode("utf-8")
+                output_routed_experts.append(result if result else None)
+            else:
+                # Legacy format: tensor of ids only
+                output_routed_experts.append(
+                    pybase64.b64encode(routed_experts.numpy().tobytes()).decode("utf-8")
                 )
-                for output_routed_experts in recv_obj.output_routed_experts
-            ]
         return output_routed_experts
 
     def handle_batch_token_id_out(self, recv_obj: BatchTokenIDOutput):

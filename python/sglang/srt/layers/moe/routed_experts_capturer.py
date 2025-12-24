@@ -35,29 +35,44 @@ class _RoutedExpertsDeviceCache:
         num_fused_shared_experts: int,
         device: str,
     ) -> None:
-        self.buffer = torch.zeros(
-            (
-                max(
-                    get_global_server_args().chunked_prefill_size
-                    * get_global_server_args().dp_size,
-                    max_running_requests,
-                ),
-                num_hidden_layers,
-                num_experts_per_tok + num_fused_shared_experts,
+        buffer_shape = (
+            max(
+                get_global_server_args().chunked_prefill_size
+                * get_global_server_args().dp_size,
+                max_running_requests,
             ),
+            num_hidden_layers,
+            num_experts_per_tok + num_fused_shared_experts,
+        )
+        self.buffer = torch.zeros(
+            buffer_shape,
             dtype=torch.int32,
+            device=device,
+        )
+        self.weights_buffer = torch.zeros(
+            buffer_shape,
+            dtype=torch.float32,
             device=device,
         )
         self._finalize_allocation_log()
 
     def get_buffer_size_bytes(self):
         assert hasattr(self, "buffer")
-        return get_tensor_size_bytes(self.buffer)
+        return get_tensor_size_bytes(self.buffer) + get_tensor_size_bytes(
+            self.weights_buffer
+        )
 
-    def capture_fwd_routed_experts(self, layer_id: int, topk_ids: torch.Tensor):
+    def capture_fwd_routed_experts(
+        self,
+        layer_id: int,
+        topk_ids: torch.Tensor,
+        topk_weights: Optional[torch.Tensor] = None,
+    ):
         assert layer_id is not None, "capturing routing experts but get layer_id None"
         batch, _ = topk_ids.shape
         self.buffer[:batch, layer_id, :] = topk_ids
+        if topk_weights is not None:
+            self.weights_buffer[:batch, layer_id, :] = topk_weights
 
     def _finalize_allocation_log(self):
         """Common logging and memory usage computation for captured experts buffers."""
@@ -75,13 +90,20 @@ class _RoutedExpertsHostCache:
         num_experts_per_tok: int,
     ) -> None:
         self.num_tokens = num_tokens
+        buffer_shape = (
+            num_tokens,
+            num_hidden_layers,
+            num_experts_per_tok,
+        )
         self.buffer = torch.zeros(
-            (
-                num_tokens,
-                num_hidden_layers,
-                num_experts_per_tok,
-            ),
+            buffer_shape,
             dtype=torch.int32,
+            device="cpu",
+            pin_memory=True,
+        )
+        self.weights_buffer = torch.zeros(
+            buffer_shape,
+            dtype=torch.float32,
             device="cpu",
             pin_memory=True,
         )
@@ -89,7 +111,9 @@ class _RoutedExpertsHostCache:
 
     def get_buffer_size_bytes(self):
         assert hasattr(self, "buffer")
-        return get_tensor_size_bytes(self.buffer)
+        return get_tensor_size_bytes(self.buffer) + get_tensor_size_bytes(
+            self.weights_buffer
+        )
 
     def set_experts_buffer(self, layer_id: int, loc: torch.Tensor, top_k: torch.Tensor):
         self.buffer[layer_id, loc, :] = top_k.to(device="cpu", non_blocking=True)
@@ -131,7 +155,12 @@ class RoutedExpertsCapturer(ABC):
     ):
         raise NotImplementedError
 
-    def capture(self, layer_id: int, topk_ids: torch.Tensor):
+    def capture(
+        self,
+        layer_id: int,
+        topk_ids: torch.Tensor,
+        topk_weights: Optional[torch.Tensor] = None,
+    ):
         raise NotImplementedError
 
     def get_routed_experts(
@@ -204,9 +233,19 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
         self.host_cache.buffer[out_cache_loc_cpu] = self.device_cache.buffer[
             local_start_pos:local_end_pos, :, : self.num_experts_per_tok
         ].cpu()
+        self.host_cache.weights_buffer[out_cache_loc_cpu] = (
+            self.device_cache.weights_buffer[
+                local_start_pos:local_end_pos, :, : self.num_experts_per_tok
+            ].cpu()
+        )
 
-    def capture(self, layer_id: int, topk_ids: torch.Tensor):
-        self.device_cache.capture_fwd_routed_experts(layer_id, topk_ids)
+    def capture(
+        self,
+        layer_id: int,
+        topk_ids: torch.Tensor,
+        topk_weights: Optional[torch.Tensor] = None,
+    ):
+        self.device_cache.capture_fwd_routed_experts(layer_id, topk_ids, topk_weights)
 
     def get_routed_experts(
         self,
@@ -217,7 +256,10 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
         cache_pool_idx = (
             req_to_token_pool.req_to_token[req_pool_idx][: seqlen - 1].cpu().clone()
         )
-        return self.get_host_cache().buffer[cache_pool_idx]
+        return {
+            "topk_ids": self.get_host_cache().buffer[cache_pool_idx],
+            "topk_weights": self.get_host_cache().weights_buffer[cache_pool_idx],
+        }
 
     def on_forward_end(self, forward_batch, can_run_graph, cuda_graph_batch):
         self._sync_fwd_experts_buffer_DtoH(
@@ -245,7 +287,12 @@ class _RoutedExpertsCapturerNoop(RoutedExpertsCapturer):
     ):
         pass
 
-    def capture(self, layer_id: int, topk_ids: torch.Tensor):
+    def capture(
+        self,
+        layer_id: int,
+        topk_ids: torch.Tensor,
+        topk_weights: Optional[torch.Tensor] = None,
+    ):
         pass
 
     def get_routed_experts(
@@ -279,11 +326,35 @@ def set_global_experts_capturer(capturer: RoutedExpertsCapturer):
 
 
 def extract_routed_experts_from_meta_info(data):
-    # To solve the performance issue, we return the experts_ids in base64
-    # We left this function for user to change it back to normal int32
-    # See detokenizer_manager::_extract_routed_experts
-    routed_experts_base64 = data["meta_info"].get("routed_experts", None)
-    routed_experts = np.frombuffer(
-        pybase64.b64decode(routed_experts_base64.encode("utf-8")), dtype=np.int32
-    )
-    return routed_experts
+    """Extract routed experts from meta_info.
+
+    Handles both new dict format (with topk_ids and topk_weights) and
+    legacy string format (ids only).
+
+    Returns:
+        dict with 'topk_ids' (np.ndarray int32) and optionally 'topk_weights' (np.ndarray float32)
+    """
+    routed_experts = data["meta_info"].get("routed_experts", None)
+    if routed_experts is None:
+        return None
+
+    if isinstance(routed_experts, dict):
+        result = {}
+        if "topk_ids" in routed_experts:
+            result["topk_ids"] = np.frombuffer(
+                pybase64.b64decode(routed_experts["topk_ids"].encode("utf-8")),
+                dtype=np.int32,
+            )
+        if "topk_weights" in routed_experts:
+            result["topk_weights"] = np.frombuffer(
+                pybase64.b64decode(routed_experts["topk_weights"].encode("utf-8")),
+                dtype=np.float32,
+            )
+        return result
+    else:
+        # Legacy format: base64-encoded int32 array
+        return {
+            "topk_ids": np.frombuffer(
+                pybase64.b64decode(routed_experts.encode("utf-8")), dtype=np.int32
+            )
+        }
